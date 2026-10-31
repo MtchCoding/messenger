@@ -1,0 +1,23 @@
+[package]
+name = "lite-messenger"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+
+# Must match the versions Tauri itself uses. Check with:
+#   cargo tree -i webview2-com   and   cargo tree -i windows
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = "0.61"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
