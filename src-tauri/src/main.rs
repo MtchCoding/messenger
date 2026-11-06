@@ -8,21 +8,74 @@ use tauri::{
 
 const URL: &str = "https://www.facebook.com/messages/";
 
-// Kills animations/transitions so the page stops constantly repainting.
-const LITE_JS: &str = r#"
+
+
+const ADBLOCK_JS: &str = r##"
 (function () {
-  const css = `*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
-  video{display:none!important}`;
-  const add = () => {
-    if (document.getElementById('lite-css')) return;
-    const s = document.createElement('style');
-    s.id = 'lite-css'; s.textContent = css;
-    (document.head || document.documentElement).appendChild(s);
+  // 1) Block known tracker/ad requests made from page JavaScript
+  const BLOCKED = [
+    'doubleclick.net', 'googlesyndication.com', 'google-analytics.com',
+    'googletagmanager.com', 'pixel.facebook.com', 'an.facebook.com',
+    'facebook.com/tr'
+  ];
+  const isBlocked = (u) => {
+    try { u = String(u); } catch (e) { return false; }
+    return BLOCKED.some((b) => u.indexOf(b) !== -1);
   };
-  add();
-  document.addEventListener('DOMContentLoaded', add);
+  const realFetch = window.fetch;
+  if (realFetch) {
+    window.fetch = function (input) {
+      const url = input && input.url ? input.url : input;
+      if (isBlocked(url)) return Promise.resolve(new Response('', { status: 204 }));
+      return realFetch.apply(this, arguments);
+    };
+  }
+  const realBeacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+  if (realBeacon) {
+    navigator.sendBeacon = function (url) {
+      return isBlocked(url) ? true : realBeacon.apply(null, arguments);
+    };
+  }
+
+  // 2) Hide anything labelled "Sponsored" - only checks newly added nodes
+  const queue = new Set();
+  let pending = false;
+  function check(el) {
+    if (el.children.length === 0 &&
+        el.textContent.trim().toLowerCase() === 'sponsored') {
+      const row = el.closest(
+        '[role="row"],[role="listitem"],[role="article"],li,[data-pagelet]');
+      if (row) row.style.setProperty('display', 'none', 'important');
+    }
+  }
+  function sweep() {
+    pending = false;
+    const nodes = Array.from(queue);
+    queue.clear();
+    nodes.forEach((n) => {
+      if (!n.isConnected) return;
+      if (n.matches && n.matches('span,a')) check(n);
+      if (n.querySelectorAll) n.querySelectorAll('span,a').forEach(check);
+    });
+  }
+  function start() {
+    new MutationObserver((muts) => {
+      for (const m of muts)
+        for (const n of m.addedNodes) if (n.nodeType === 1) queue.add(n);
+      if (!pending && queue.size) { pending = true; setTimeout(sweep, 2000); }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    queue.add(document.documentElement);
+    pending = true;
+    setTimeout(sweep, 2000);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
 })();
-"#;
+
+"##;
 
 /// Hide + suspend the WebView2 page (stops JS timers, rendering, network
 /// activity), or resume it. This is where the real CPU savings come from.
@@ -67,7 +120,7 @@ fn main() {
             )
             .title("Messenger")
             .inner_size(1100.0, 750.0)
-            .initialization_script(LITE_JS)
+            .initialization_script(ADBLOCK_JS)
             // Replaces Tauri's defaults, so keep those and add our own.
             .additional_browser_args(
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate \
