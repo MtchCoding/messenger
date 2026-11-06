@@ -3,7 +3,7 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 const URL: &str = "https://www.facebook.com/messages/";
@@ -12,31 +12,6 @@ const URL: &str = "https://www.facebook.com/messages/";
 
 const ADBLOCK_JS: &str = r##"
 (function () {
-  // 1) Block known tracker/ad requests made from page JavaScript
-  const BLOCKED = [
-    'doubleclick.net', 'googlesyndication.com', 'google-analytics.com',
-    'googletagmanager.com', 'pixel.facebook.com', 'an.facebook.com',
-    'facebook.com/tr'
-  ];
-  const isBlocked = (u) => {
-    try { u = String(u); } catch (e) { return false; }
-    return BLOCKED.some((b) => u.indexOf(b) !== -1);
-  };
-  const realFetch = window.fetch;
-  if (realFetch) {
-    window.fetch = function (input) {
-      const url = input && input.url ? input.url : input;
-      if (isBlocked(url)) return Promise.resolve(new Response('', { status: 204 }));
-      return realFetch.apply(this, arguments);
-    };
-  }
-  const realBeacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
-  if (realBeacon) {
-    navigator.sendBeacon = function (url) {
-      return isBlocked(url) ? true : realBeacon.apply(null, arguments);
-    };
-  }
-
   // 2) Hide anything labelled "Sponsored" - only checks newly added nodes
   const queue = new Set();
   let pending = false;
@@ -131,6 +106,57 @@ fn show(win: &WebviewWindow) {
     let _ = win.set_focus();
 }
 
+/// Open a link in the user's normal browser.
+fn open_external(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+    }
+}
+
+/// Messenger-only: allow messages + login/security pages, send everything else
+/// to the default browser instead of loading it inside the app.
+fn allow_nav(url: &Url) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return true; // about:, blob:, data: etc.
+    }
+    let host = url.host_str().unwrap_or("");
+    let path = url.path();
+    let is = |d: &str| host == d || host.ends_with(&format!(".{d}"));
+
+    if is("messenger.com") {
+        return true;
+    }
+    if is("facebook.com") {
+        // Links shared in chats go through l.php -> open the real target outside
+        if path.starts_with("/l.php") {
+            if let Some((_, u)) = url.query_pairs().find(|(k, _)| &**k == "u") {
+                open_external(&u);
+            }
+            return false;
+        }
+        const OK: [&str; 22] = [
+            "/messages", "/messenger_media", "/login", "/checkpoint", "/recover",
+            "/two_factor", "/cookie", "/privacy", "/dialog", "/ajax", "/api",
+            "/security", "/help", "/device-based", "/confirmemail", "/plugins",
+            "/rsrc", "/x/oauth", "/legal", "/policies", "/settings", "/identity",
+        ];
+        return OK.iter().any(|p| path.starts_with(p));
+    }
+    // Facebook infrastructure hosts
+    if is("fbcdn.net") || is("fbsbx.com") || is("facebook.net") || is("fb.com") {
+        return true;
+    }
+    open_external(url.as_str());
+    false
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -141,12 +167,8 @@ fn main() {
             )
             .title("Messenger")
             .inner_size(1100.0, 750.0)
+            .on_navigation(|url| allow_nav(url))
             .initialization_script(ADBLOCK_JS)
-            // Replaces Tauri's defaults, so keep those and add our own.
-            .additional_browser_args(
-                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate \
-                 --disable-background-networking --disable-component-update",
-            )
             .build()?;
 
             // Suspend when minimized, resume when restored.
