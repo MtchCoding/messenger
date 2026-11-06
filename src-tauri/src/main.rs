@@ -40,13 +40,34 @@ const ADBLOCK_JS: &str = r##"
   // 2) Hide anything labelled "Sponsored" - only checks newly added nodes
   const queue = new Set();
   let pending = false;
-  function check(el) {
-    if (el.children.length === 0 &&
-        el.textContent.trim().toLowerCase() === 'sponsored') {
-      const row = el.closest(
-        '[role="row"],[role="listitem"],[role="article"],li,[data-pagelet]');
-      if (row) row.style.setProperty('display', 'none', 'important');
+  const HEAD = 'h1,h2,h3,h4,[role="heading"]';
+  const SEL = 'span,a,h1,h2,h3,h4,[role="heading"]';
+  const hide = (e) => e.style.setProperty('display', 'none', 'important');
+  function hideSection(h) {
+    // climb while the wrapper still contains only this one heading
+    let node = h;
+    for (let i = 0; i < 10; i++) {
+      const p = node.parentElement;
+      if (!p || p === document.body || p === document.documentElement) break;
+      if (p.querySelectorAll(HEAD).length > 1) break;
+      node = p;
     }
+    if (node === h) {
+      // heading and ads are siblings: hide the siblings that follow it
+      let sib = node.nextElementSibling, n = 0;
+      while (sib && n < 4 && !sib.matches(HEAD) && !sib.querySelector(HEAD)) {
+        hide(sib); sib = sib.nextElementSibling; n++;
+      }
+    }
+    hide(node);
+  }
+  function check(el) {
+    if (el.children.length !== 0) return;
+    if (el.textContent.trim().toLowerCase() !== 'sponsored') return;
+    const h = el.closest(HEAD);
+    if (h) { hideSection(h); return; }
+    const row = el.closest('[role="row"],[role="listitem"],[role="article"],li');
+    if (row) hide(row);
   }
   function sweep() {
     pending = false;
@@ -54,8 +75,8 @@ const ADBLOCK_JS: &str = r##"
     queue.clear();
     nodes.forEach((n) => {
       if (!n.isConnected) return;
-      if (n.matches && n.matches('span,a')) check(n);
-      if (n.querySelectorAll) n.querySelectorAll('span,a').forEach(check);
+      if (n.matches && n.matches(SEL)) check(n);
+      if (n.querySelectorAll) n.querySelectorAll(SEL).forEach(check);
     });
   }
   function start() {
