@@ -12,6 +12,36 @@ const URL: &str = "https://www.facebook.com/messages/";
 
 const ADBLOCK_JS: &str = r##"
 (function () {
+  // 0) Messenger-only: hide Facebook's top bar and block in-page jumps
+  const loggedIn = /(?:^|;\s*)c_user=/.test(document.cookie);
+  if (loggedIn) {
+  const st = document.createElement('style');
+  st.textContent = '[role="banner"]{display:none!important}';
+  (document.head || document.documentElement).appendChild(st);
+  const OKPATH = /^\/(messages|messenger_media|login|checkpoint|recover|two_factor|cookie|privacy|dialog|ajax|api|security|help|device-based|confirmemail|plugins|rsrc|x\/oauth|legal|policies|settings|identity)/;
+  const offLimits = (href) => {
+    try {
+      const u = new URL(href, location.href);
+      if (!/(^|\.)facebook\.com$/.test(u.hostname)) return false;
+      return !OKPATH.test(u.pathname);
+    } catch (e) { return false; }
+  };
+  document.addEventListener('click', (e) => {
+    const a = e.target && e.target.closest && e.target.closest('a[href]');
+    if (a && offLimits(a.getAttribute('href'))) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
+  ['pushState', 'replaceState'].forEach((fn) => {
+    const orig = history[fn];
+    history[fn] = function (state, title, url) {
+      if (url && offLimits(url)) return;
+      return orig.apply(this, arguments);
+    };
+  });
+  }
+
   // 2) Hide anything labelled "Sponsored" - only checks newly added nodes
   const queue = new Set();
   let pending = false;
@@ -140,6 +170,9 @@ fn allow_nav(url: &Url) -> bool {
                 open_external(&u);
             }
             return false;
+        }
+        if path == "/" {
+            return true; // logged-out landing / login page
         }
         const OK: [&str; 22] = [
             "/messages", "/messenger_media", "/login", "/checkpoint", "/recover",
