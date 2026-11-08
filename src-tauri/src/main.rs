@@ -150,8 +150,8 @@ fn open_external(url: &str) {
     }
 }
 
-/// Messenger-only: allow messages + login/security pages, send everything else
-/// to the default browser instead of loading it inside the app.
+/// Keep everything on Facebook's own sites inside the app (login, recovery and
+/// security pages included). Only links to *other* sites open in your browser.
 fn allow_nav(url: &Url) -> bool {
     if url.scheme() != "http" && url.scheme() != "https" {
         return true; // about:, blob:, data: etc.
@@ -160,30 +160,18 @@ fn allow_nav(url: &Url) -> bool {
     let path = url.path();
     let is = |d: &str| host == d || host.ends_with(&format!(".{d}"));
 
-    if is("messenger.com") {
-        return true;
-    }
-    if is("facebook.com") {
-        // Links shared in chats go through l.php -> open the real target outside
-        if path.starts_with("/l.php") {
-            if let Some((_, u)) = url.query_pairs().find(|(k, _)| &**k == "u") {
-                open_external(&u);
-            }
-            return false;
+    // Links shared in chats go through l.php -> open the real target outside
+    if is("facebook.com") && path.starts_with("/l.php") {
+        if let Some((_, u)) = url.query_pairs().find(|(k, _)| &**k == "u") {
+            open_external(&u);
         }
-        if path == "/" {
-            return true; // logged-out landing / login page
-        }
-        const OK: [&str; 22] = [
-            "/messages", "/messenger_media", "/login", "/checkpoint", "/recover",
-            "/two_factor", "/cookie", "/privacy", "/dialog", "/ajax", "/api",
-            "/security", "/help", "/device-based", "/confirmemail", "/plugins",
-            "/rsrc", "/x/oauth", "/legal", "/policies", "/settings", "/identity",
-        ];
-        return OK.iter().any(|p| path.starts_with(p));
+        return false;
     }
-    // Facebook infrastructure hosts
-    if is("fbcdn.net") || is("fbsbx.com") || is("facebook.net") || is("fb.com") {
+    const FAMILY: &[&str] = &[
+        "facebook.com", "messenger.com", "fbcdn.net", "fbsbx.com",
+        "facebook.net", "fb.com", "fb.me", "meta.com", "instagram.com",
+    ];
+    if FAMILY.iter().any(|d| is(*d)) {
         return true;
     }
     open_external(url.as_str());
