@@ -8,6 +8,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 
 # Must match the versions Tauri itself uses. Check with:
 #   cargo tree -i webview2-com   and   cargo tree -i windows
