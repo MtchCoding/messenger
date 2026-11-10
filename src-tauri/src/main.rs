@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -8,18 +9,28 @@ use tauri::{
 
 const URL: &str = "https://www.facebook.com/messages/";
 
-
-
 const ADBLOCK_JS: &str = r##"
 (function () {
-  // 0) Messenger-only: hide Facebook's top bar and block in-page jumps
-  const loggedIn = /(?:^|;\s*)c_user=/.test(document.cookie);
-  if (loggedIn) {
-  const st = document.createElement('style');
-  st.textContent = '[role="banner"]{display:none!important}';
-  (document.head || document.documentElement).appendChild(st);
+  const isMsgs = () => /^\/messages/.test(location.pathname);
+  const HEAD = 'h1,h2,h3,h4,[role="heading"]';
+  const hide = (e) => e.style.setProperty('display', 'none', 'important');
+
+  // --- Messenger-only: hide Facebook's top bar, only on the messages page ---
+  const bar = document.createElement('style');
+  bar.textContent = '[role="banner"]{display:none!important}';
+  function syncBar() {
+    if (isMsgs()) {
+      if (!bar.isConnected) (document.head || document.documentElement).appendChild(bar);
+    } else if (bar.isConnected) {
+      bar.remove();
+    }
+  }
+  syncBar();
+
+  // --- block in-page jumps to the rest of Facebook (only from /messages) ---
   const OKPATH = /^\/(messages|messenger_media|login|checkpoint|recover|two_factor|cookie|privacy|dialog|ajax|api|security|help|device-based|confirmemail|plugins|rsrc|x\/oauth|legal|policies|settings|identity)/;
   const offLimits = (href) => {
+    if (!isMsgs()) return false;
     try {
       const u = new URL(href, location.href);
       if (!/(^|\.)facebook\.com$/.test(u.hostname)) return false;
@@ -37,19 +48,16 @@ const ADBLOCK_JS: &str = r##"
     const orig = history[fn];
     history[fn] = function (state, title, url) {
       if (url && offLimits(url)) return;
-      return orig.apply(this, arguments);
+      const r = orig.apply(this, arguments);
+      syncBar();
+      return r;
     };
   });
-  }
+  window.addEventListener('popstate', syncBar);
 
-  // 2) Hide anything labelled "Sponsored" - only checks newly added nodes
-  const queue = new Set();
-  let pending = false;
-  const HEAD = 'h1,h2,h3,h4,[role="heading"]';
-  const SEL = 'span,a,h1,h2,h3,h4,[role="heading"]';
-  const hide = (e) => e.style.setProperty('display', 'none', 'important');
+  // --- hide "Sponsored" section headings (cheap: only looks at headings) ---
+  const seen = new WeakSet();
   function hideSection(h) {
-    // climb while the wrapper still contains only this one heading
     let node = h;
     for (let i = 0; i < 10; i++) {
       const p = node.parentElement;
@@ -58,7 +66,6 @@ const ADBLOCK_JS: &str = r##"
       node = p;
     }
     if (node === h) {
-      // heading and ads are siblings: hide the siblings that follow it
       let sib = node.nextElementSibling, n = 0;
       while (sib && n < 4 && !sib.matches(HEAD) && !sib.querySelector(HEAD)) {
         hide(sib); sib = sib.nextElementSibling; n++;
@@ -66,50 +73,52 @@ const ADBLOCK_JS: &str = r##"
     }
     hide(node);
   }
-  function check(el) {
-    if (el.children.length !== 0) return;
-    if (el.textContent.trim().toLowerCase() !== 'sponsored') return;
-    const h = el.closest(HEAD);
-    if (h) { hideSection(h); return; }
-    const row = el.closest('[role="row"],[role="listitem"],[role="article"],li');
-    if (row) hide(row);
-  }
-  function sweep() {
-    pending = false;
-    const nodes = Array.from(queue);
-    queue.clear();
-    nodes.forEach((n) => {
-      if (!n.isConnected) return;
-      if (n.matches && n.matches(SEL)) check(n);
-      if (n.querySelectorAll) n.querySelectorAll(SEL).forEach(check);
+  function sweepHeadings() {
+    if (document.hidden) return;
+    document.querySelectorAll(HEAD).forEach((h) => {
+      if (seen.has(h)) return;
+      seen.add(h);
+      if (h.textContent.trim().toLowerCase() === 'sponsored') hideSection(h);
     });
   }
-  function start() {
-    new MutationObserver((muts) => {
-      for (const m of muts)
-        for (const n of m.addedNodes) if (n.nodeType === 1) queue.add(n);
-      if (!pending && queue.size) { pending = true; setTimeout(sweep, 2000); }
-    }).observe(document.documentElement, { childList: true, subtree: true });
-    queue.add(document.documentElement);
-    pending = true;
-    setTimeout(sweep, 2000);
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
-  } else {
-    start();
-  }
+  setInterval(sweepHeadings, 5000);
 })();
-
 "##;
 
-/// Hide + suspend the WebView2 page (stops JS timers, rendering, network
-/// activity), or resume it. This is where the real CPU savings come from.
+static SUSPENDED_AT: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Hide + suspend the WebView2 page, or resume it. If it was suspended for
+/// more than 2 minutes, reload on resume so Messenger reconnects cleanly
+/// instead of sitting on a stuck "Sending..." state.
 #[cfg(windows)]
 fn set_suspended(win: &WebviewWindow, suspend: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
     use webview2_com::TrySuspendCompletedHandler;
     use windows::core::Interface;
+
+    let mut reload = false;
+    if suspend {
+        if SUSPENDED_AT
+            .compare_exchange(0, now_secs(), Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return; // already suspended
+        }
+    } else {
+        let since = SUSPENDED_AT.swap(0, Ordering::SeqCst);
+        if since == 0 {
+            return; // wasn't suspended
+        }
+        reload = now_secs().saturating_sub(since) > 120;
+    }
 
     let _ = win.with_webview(move |wv| unsafe {
         let controller = wv.controller();
@@ -124,6 +133,9 @@ fn set_suspended(win: &WebviewWindow, suspend: bool) {
             let _ = controller.SetIsVisible(true);
         }
     });
+    if reload {
+        let _ = win.eval("location.reload()");
+    }
 }
 
 #[cfg(not(windows))]
@@ -154,13 +166,12 @@ fn open_external(url: &str) {
 /// security pages included). Only links to *other* sites open in your browser.
 fn allow_nav(url: &Url) -> bool {
     if url.scheme() != "http" && url.scheme() != "https" {
-        return true; // about:, blob:, data: etc.
+        return true;
     }
     let host = url.host_str().unwrap_or("");
     let path = url.path();
     let is = |d: &str| host == d || host.ends_with(&format!(".{d}"));
 
-    // Links shared in chats go through l.php -> open the real target outside
     if is("facebook.com") && path.starts_with("/l.php") {
         if let Some((_, u)) = url.query_pairs().find(|(k, _)| &**k == "u") {
             open_external(&u);
@@ -180,6 +191,12 @@ fn allow_nav(url: &Url) -> bool {
 
 fn main() {
     tauri::Builder::default()
+        // Must be first: a second launch just brings the existing window back.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                show(&w);
+            }
+        }))
         .setup(|app| {
             let win = WebviewWindowBuilder::new(
                 app,
@@ -192,14 +209,12 @@ fn main() {
             .initialization_script(ADBLOCK_JS)
             .build()?;
 
-            // Suspend when minimized, resume when restored.
             let w = win.clone();
             win.on_window_event(move |e| match e {
                 WindowEvent::Resized(_) => {
                     set_suspended(&w, w.is_minimized().unwrap_or(false));
                 }
                 WindowEvent::CloseRequested { api, .. } => {
-                    // Close button -> hide to tray + suspend.
                     api.prevent_close();
                     let _ = w.hide();
                     set_suspended(&w, true);
@@ -207,7 +222,6 @@ fn main() {
                 _ => {}
             });
 
-            // Tray icon
             let open = MenuItem::with_id(app, "open", "Open Messenger", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
@@ -218,7 +232,9 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "open" => {
-                        if let Some(w) = app.get_webview_window("main") { show(&w); }
+                        if let Some(w) = app.get_webview_window("main") {
+                            show(&w);
+                        }
                     }
                     "quit" => app.exit(0),
                     _ => {}
