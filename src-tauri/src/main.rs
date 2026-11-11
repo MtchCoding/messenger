@@ -55,6 +55,39 @@ const ADBLOCK_JS: &str = r##"
   });
   window.addEventListener('popstate', syncBar);
 
+  // --- links to other sites (and window.open) go to the default browser ---
+  const FAMILY = /(^|\.)(facebook\.com|messenger\.com|fbcdn\.net|fbsbx\.com|facebook\.net|fb\.com|fb\.me|meta\.com|instagram\.com)$/;
+  const isExternal = (u) => {
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (!FAMILY.test(u.hostname)) return true;
+    return /(^|\.)facebook\.com$/.test(u.hostname) && u.pathname.indexOf('/l.php') === 0;
+  };
+  // Navigating to these is intercepted by the app, which opens your browser.
+  const toBrowser = (u) => { location.assign(u.href); };
+  function extClick(e) {
+    const a = e.target && e.target.closest && e.target.closest('a[href]');
+    if (!a) return;
+    let u;
+    try { u = new URL(a.href, location.href); } catch (err) { return; }
+    if (isExternal(u)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      toBrowser(u);
+    }
+  }
+  document.addEventListener('click', extClick, true);
+  document.addEventListener('auxclick', extClick, true);
+  const realOpen = window.open;
+  window.open = function (url) {
+    try {
+      if (url) {
+        const u = new URL(url, location.href);
+        if (isExternal(u)) { toBrowser(u); return null; }
+      }
+    } catch (err) {}
+    return realOpen.apply(this, arguments);
+  };
+
   // --- hide "Sponsored" section headings (cheap: only looks at headings) ---
   const seen = new WeakSet();
   function hideSection(h) {
@@ -206,6 +239,7 @@ fn main() {
             .title("Messenger")
             .inner_size(1100.0, 750.0)
             .on_navigation(|url| allow_nav(url))
+            .disable_drag_drop_handler()
             .initialization_script(ADBLOCK_JS)
             .build()?;
 
