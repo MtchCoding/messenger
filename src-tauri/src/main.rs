@@ -34,6 +34,7 @@ const ADBLOCK_JS: &str = r##"
     try {
       const u = new URL(href, location.href);
       if (!/(^|\.)facebook\.com$/.test(u.hostname)) return false;
+      if (u.pathname.indexOf('/l.php') === 0) return false; // external-link wrapper: handled below
       return !OKPATH.test(u.pathname);
     } catch (e) { return false; }
   };
